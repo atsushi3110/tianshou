@@ -112,8 +112,13 @@ class PPOPolicy(A2CPolicy):
                 # calculate loss for actor
                 dist = self(minibatch).dist
                 if self._norm_adv:
-                    mean, std = minibatch.adv.mean(), minibatch.adv.std()
-                    minibatch.adv = (minibatch.adv - mean) / std  # per-batch norm
+                    with torch.no_grad():
+                        mean, std = minibatch.adv.mean(), minibatch.adv.std()
+                        __adv = (minibatch.adv - mean) / (1e-5+std)
+                        if not __adv.isnan().any() and not __adv.isinf().any():
+                            minibatch.adv = __adv  # per-batch norm
+
+                # with torch.inference_mode():
                 ratio = (dist.log_prob(minibatch.act) -
                          minibatch.logp_old).exp().float()
                 ratio = ratio.reshape(ratio.size(0), -1).transpose(0, 1)
