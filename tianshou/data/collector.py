@@ -1,6 +1,8 @@
 import time
 import warnings
 from typing import Any, Callable, Dict, List, Optional, Union
+import os
+import json
 
 import gym
 import numpy as np
@@ -209,6 +211,7 @@ class Collector(object):
         render: Optional[float] = None,
         no_grad: bool = True,
         gym_reset_kwargs: Optional[Dict[str, Any]] = None,
+        dump_info_path:Optional[str]=None
     ) -> Dict[str, Any]:
         """Collect a specified number of step or episode.
 
@@ -366,6 +369,19 @@ class Collector(object):
             if np.any(done):
                 env_ind_local = np.where(done)[0]
                 env_ind_global = ready_env_ids[env_ind_local]
+
+                if dump_info_path is not None:
+                    path = os.path.abspath(dump_info_path)
+                    # assert  os.path.exists(path), os.path.exists(path)
+                    line = info[env_ind_local.item()]
+                    assert isinstance(line, Dict)
+                    line["env_ind_local"] = int(env_ind_local)
+                    line["env_ind_global"] = int(env_ind_global)
+                    line["step_count"] = int(step_count)
+                    line["env_id"] = int(line["env_id"])
+                    with open(path, "a") as fout:
+                        fout.write(json.dumps(line, ensure_ascii=False)+"\n")
+
                 episode_count += len(env_ind_local)
                 episode_lens.append(ep_len[env_ind_local])
                 episode_rews.append(ep_rew[env_ind_local])
