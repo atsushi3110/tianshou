@@ -379,8 +379,9 @@ class Collector(object):
                     line["env_ind_global"] = int(env_ind_global)
                     line["step_count"] = int(step_count)
                     line["env_id"] = int(line["env_id"])
+                    _line = {k:v for k,v in line.items() if not isinstance(v, np.ndarray)}
                     with open(path, "a") as fout:
-                        fout.write(json.dumps(line, ensure_ascii=False)+"\n")
+                        fout.write(json.dumps(_line, ensure_ascii=False)+"\n")
 
                 episode_count += len(env_ind_local)
                 episode_lens.append(ep_len[env_ind_local])
