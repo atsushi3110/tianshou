@@ -340,7 +340,26 @@ class BasePolicy(ABC, nn.Module):
 
         end_flag = np.logical_or(batch.terminated, batch.truncated)
         end_flag[np.isin(indices, buffer.unfinished_index())] = True
-        advantage = _gae_return(v_s, v_s_, rew, end_flag, gamma, gae_lambda)
+
+        if not (v_s.dtype == v_s_.dtype == rew.dtype):
+            v_s = v_s.astype(np.float32)
+            v_s_ = v_s_.astype(np.float32)
+            rew = rew.astype(np.float32)
+
+        try:
+            advantage = _gae_return(v_s, v_s_, rew, end_flag, gamma, gae_lambda)
+        except:
+            import traceback
+            err = traceback.print_exc()
+            Ts=[]
+            SHs=[]
+            _args = (v_s, v_s_, rew, end_flag, gamma, gae_lambda)
+            for _arg in _args:
+                Ts.append(str(_arg.dtype) if hasattr(_arg, "dtype") else str(type(_arg)))
+                SHs.append(str(_arg.shape) if hasattr(_arg, "shape") else "None")
+            argstr = "\n".join([z[0] + ", " + z[1] for z in zip(Ts, SHs)])
+            raise Exception(f"\n {argstr} \n {err} \n {_args}")
+
         returns = advantage + v_s
         # normalization varies from each policy, so we don't do it here
         return returns, advantage
