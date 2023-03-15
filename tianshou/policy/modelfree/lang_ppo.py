@@ -10,6 +10,34 @@ from tianshou.utils.net.common import ActorCritic
 from  torch.distributions import Categorical
 
 
+
+class AdaptiveKLController:
+    """Adaptive KL Controller as described in Ziegler et al. "Fine-Tuning Language Models from Human Preferences"
+    Reference: Section 2.2 https://arxiv.org/pdf/1909.08593.pdf#page=2
+    Source: https://github.com/openai/lm-human-preferences/blob/master/lm_human_preferences/train_policy.py
+    """
+
+    def __init__(self, init_kl_coef: float, target: float, horizon: int, clip:float=0.2, is_fixed:bool=False):
+        self.value = init_kl_coef
+        self.target = target
+        self.horizon = horizon
+        self.c = clip
+        self.is_fixed = is_fixed
+
+    def update(self, current: float, n_steps: int):
+        """Returns adaptively updated KL coefficient, βₜ₊₁.
+        Arguments:
+            current: The current KL value between the newest policy and the initial policy.
+        """
+        if self.is_fixed:
+            return 
+
+        with torch.no_grad():
+            proportional_error = torch.clip(current / self.target - 1, -self.c, self.c)  # ϵₜ
+            mult = 1 + proportional_error * n_steps / self.horizon
+            self.value *= mult  # βₜ₊₁
+
+
 class LangPPOPolicy(A2CPolicy):
     r"""Implementation of Proximal Policy Optimization. arXiv:1707.06347. for Language Models
 
@@ -74,7 +102,8 @@ class LangPPOPolicy(A2CPolicy):
         value_clip: bool = False,
         advantage_normalization: bool = True,
         recompute_advantage: bool = False,
-        kl_beta_of_pertrained_lang_model: float = 0.02,
+        kl_beta_of_pertrained_lang_model:AdaptiveKLController = AdaptiveKLController(100, 10, 1024, 0.2),
+        kl_safe_delta:Optional[float]=None,
         **kwargs: Any,
     ) -> None:
         super().__init__(actor, critic, optim, dist_fn, **kwargs)
@@ -87,28 +116,42 @@ class LangPPOPolicy(A2CPolicy):
         self._recompute_adv = recompute_advantage
         self._actor_critic: ActorCritic
         self.kl_beta = kl_beta_of_pertrained_lang_model
+        self.kl_safe_delta = kl_safe_delta
 
     def process_fn(
         self, batch: Batch, buffer: ReplayBuffer, indices: np.ndarray
     ) -> Batch:
+        # print(batch.act.shape, batch.obs.shape, batch.rew.shape)
         #v batch.to_torch(dtype=None, device=self.actor.device)
         # print(batch.obs.shape, batch.act.shape, batch.act.dtype, batch.rew.shape)
         with torch.inference_mode():
             actor_out:Batch = self(batch)
             batch.act = to_torch(batch.act, device=actor_out.logits.device)
-            batch.logp_old = actor_out.dist.log_prob(batch.act).clone()
+            batch.logp_old = actor_out.dist.log_prob(batch.act.squeeze(-1)).clone()
+            
+        if len(batch.act.shape) == 2 and batch.act.shape[-1] == 1:
+            batch.act = batch.act.squeeze(-1)
+        elif len(batch.act.shape) == 1:
+            assert batch.act.shape[0] == batch.rew.shape[0] == batch.obs.shape[0]\
+                , [batch.act.shape, batch.rew.shape, batch.obs.shape]
             
         if not hasattr(batch.info, "current_action_logits_of_initial_model"):
-            raise ValueError("Use an env having current_action_logits_of_initial_model in info.")
+            raise ValueError("env must return info with the key *current_action_logits_of_initial_model* for this env.")
 
         ref_logits_old = to_torch(batch.info.current_action_logits_of_initial_model, device=actor_out.logits.device)
         # ref_logits_old = batch.info.current_action_logits_of_initial_model
         ref_logp_old = Categorical(logits=ref_logits_old).log_prob(batch.act)
-        # assert False, [batch.logp_old.shape, ref_logp_old.shape, ref_logits_old.shape]
+        # assert False, [batch.logp_old.shape, ref_logp_old.shape, ref_logits_old.shape, batch.act.shape]
         # Initial Language Model as reference model
-        approximate_kl_penal = -1 * self.kl_beta * (batch.logp_old - ref_logp_old)
-        # assert False, [batch.rew.shape, approximate_kl_penal.cpu().numpy().shape]
-        batch.rew = batch.rew + approximate_kl_penal.cpu().numpy()
+        self.approximate_kl_penal = -1 * self.kl_beta.value * (batch.logp_old - ref_logp_old)
+        # assert False, [batch.rew.shape, self.approximate_kl_penal.cpu().numpy().shape]
+        kl_penal = self.approximate_kl_penal.cpu().numpy()
+        
+        if self.kl_safe_delta is None:
+            batch.rew = batch.rew + kl_penal
+        else:
+            # Excessive Penalty is forced to be zero.
+            batch.rew = batch.rew + np.where(kl_penal > -1 * self.kl_safe_delta, 0.0, 1.0) * kl_penal
 
         if self._recompute_adv:
             # buffer input `buffer` and `indices` to be used in `learn()`.
@@ -170,6 +213,8 @@ class LangPPOPolicy(A2CPolicy):
                 vf_losses.append(vf_loss.item())
                 ent_losses.append(ent_loss.item())
                 losses.append(loss.item())
+
+        self.kl_beta.update(self.approximate_kl_penal, batch_size)
 
         return {
             "loss": losses,
@@ -235,6 +280,7 @@ class LangPPOPolicy(A2CPolicy):
                     self._actor_critic.parameters(), max_norm=self._grad_norm
                 )
             self.optim.step()
+        
 
 
         return {
