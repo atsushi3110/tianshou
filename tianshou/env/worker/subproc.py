@@ -2,7 +2,11 @@ import ctypes
 import time
 from collections import OrderedDict
 from multiprocessing import Array, Pipe, connection
-from multiprocessing.context import Process
+import torch
+from torch.multiprocessing import Pool, Process, set_start_method
+torch.multiprocessing.set_start_method('fork', force=True)
+
+# from multiprocessing.context import Process
 from typing import Any, Callable, List, Optional, Tuple, Union
 
 import gym
